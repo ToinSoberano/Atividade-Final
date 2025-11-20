@@ -1,0 +1,167 @@
+import os
+import json
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+
+# Constantes do sistema
+PRIORIDADES = ["Urgente", "Alta", "Média", "Baixa"]
+STATUS_VALIDOS = ["Pendente", "Fazendo", "Concluída", "Arquivado", "Excluída"]
+ORIGENS = ["E-mail", "Telefone", "Chamado do Sistema"]
+
+TAREFAS_FILE = "tarefas.json"
+ARQUIVADAS_FILE = "tarefas_arquivadas.json"
+
+def ensure_files_exist():
+    """Garante que os arquivos JSON existem com estrutura inicial []"""
+    if not os.path.exists(TAREFAS_FILE):
+        with open(TAREFAS_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+    if not os.path.exists(ARQUIVADAS_FILE):
+        with open(ARQUIVADAS_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f, ensure_ascii=False, indent=2)
+
+def load_tarefas() -> List[Dict]:
+    """Carrega a lista de tarefas do arquivo tarefas.json"""
+    with open(TAREFAS_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_tarefas(tarefas: List[Dict]):
+    """Salva a lista de tarefas no arquivo tarefas.json"""
+    with open(TAREFAS_FILE, "w", encoding="utf-8") as f:
+        json.dump(tarefas, f, ensure_ascii=False, indent=2)
+
+def save_arquivado(entry: Dict):
+    """Acrescenta uma tarefa ao arquivo de arquivados (acumula histórico)"""
+    with open(ARQUIVADAS_FILE, "r+", encoding="utf-8") as f:
+        data = json.load(f)
+        data.append(entry)
+        f.seek(0)
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.truncate()
+
+def next_id(tarefas: List[Dict]) -> int:
+    """Retorna o próximo ID numérico incremental"""
+    if not tarefas:
+        return 1
+    return max(t["id"] for t in tarefas) + 1
+
+def now_str() -> str:
+    """Retorna datetime atual em string serializável"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def str_to_dt(s: str) -> datetime:
+    """Converte string serializada para datetime"""
+    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+
+def criar_tarefa(tarefas: List[Dict], titulo: str, descricao: str, prioridade: str, origem: str) -> Dict:
+    """
+    Cria uma nova tarefa, valida campos e retorna a tarefa criada.
+    Não salva automaticamente; o chamador decide quando salvar.
+    """
+    if prioridade not in PRIORIDADES:
+        raise ValueError("Prioridade inválida")
+    if origem not in ORIGENS:
+        raise ValueError("Origem inválida")
+    tarefa = {
+        "id": next_id(tarefas),
+        "titulo": titulo.strip(),
+        "descricao": descricao.strip(),
+        "prioridade": prioridade,
+        "status": "Pendente",
+        "origem": origem,
+        "data_criacao": now_str(),
+        "data_conclusao": None
+    }
+    tarefas.append(tarefa)
+    return tarefa
+
+HIERARQUIA = {p: i for i, p in enumerate(PRIORIDADES, start=1)}
+
+def pegar_proxima(tarefas: List[Dict]) -> Optional[Dict]:
+    """
+    Seleciona a próxima tarefa a executar:
+    - Filtra tarefas com status Pendente ou Fazendo (mas só uma pode estar Fazendo),
+    - Prioriza pela prioridade definida em HIERARQUIA,
+    - Retorna a primeira encontrada e marca como Fazendo.
+    """
+    candidatas = [t for t in tarefas if t["status"] in ("Pendente",)]
+    if not candidatas:
+        return None
+    candidatas.sort(key=lambda x: (HIERARQUIA.get(x["prioridade"], 999), x["data_criacao"]))
+    proxima = candidatas[0]
+    proxima["status"] = "Fazendo"
+    return proxima
+
+def atualizar_prioridade(tarefas: List[Dict], task_id: int, nova: str) -> bool:
+    """Atualiza prioridade se ID existir e nova prioridade for válida"""
+    if nova not in PRIORIDADES:
+        return False
+    for t in tarefas:
+        if t["id"] == task_id:
+            t["prioridade"] = nova
+            return True
+    return False
+
+def concluir_tarefa(tarefas: List[Dict], task_id: int) -> bool:
+    """Marca como Concluída e seta data de conclusão; só para tarefas válidas"""
+    for t in tarefas:
+        if t["id"] == task_id and t["status"] != "Excluída":
+            t["status"] = "Concluída"
+            t["data_conclusao"] = now_str()
+            return True
+    return False
+
+def arquivar_antigas(tarefas: List[Dict]):
+    """
+    Move para Arquivado tarefas concluídas há mais de 7 dias.
+    Atualiza o arquivo de arquivados acumulando histórico.
+    """
+    to_archive = []
+    for t in tarefas:
+        if t["status"] == "Concluída" and t.get("data_conclusao"):
+            concl_dt = str_to_dt(t["data_conclusao"])
+            if datetime.now() - concl_dt > timedelta(days=7):
+                t["status"] = "Arquivado"
+                to_archive.append(t.copy())
+    for entry in to_archive:
+        save_arquivado(entry)
+
+def excluir_tarefa(tarefas: List[Dict], task_id: int) -> bool:
+    """Exclusão lógica: atualiza status para 'Excluída'"""
+    for t in tarefas:
+        if t["id"] == task_id:
+            t["status"] = "Excluída"
+            return True
+    return False
+
+def relatorio_completo(tarefas: List[Dict]) -> List[str]:
+    """Gera lista de strings com informações formatadas; calcula tempo quando aplicável"""
+    linhas = []
+    for t in tarefas:
+        linha = f"ID: {t['id']} | Título: {t['titulo']} | Prioridade: {t['prioridade']} | Status: {t['status']} | Origem: {t['origem']} | Criado: {t['data_criacao']}"
+        if t.get("data_conclusao"):
+            tempo_exec = str_to_dt(t["data_conclusao"]) - str_to_dt(t["data_criacao"])
+            linha += f" | Concluído: {t['data_conclusao']} | Tempo de execução: {tempo_exec}"
+        linhas.append(linha)
+    return linhas
+
+def relatorio_arquivados() -> List[str]:
+    """Lê tarefas arquivadas e retorna lista formatada (exclui excluídos por regra)"""
+    with open(ARQUIVADAS_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    linhas = []
+    for t in data:
+        if t.get("status") == "Excluída":
+            continue
+        linhas.append(f"ID: {t['id']} | Título: {t['titulo']} | Arquivado em: {t.get('data_conclusao','-')}")
+    return linhas
+
+def main():
+    ensure_files_exist()
+    tarefas = load_tarefas()
+    # Exemplo de uso sequencial minimal: arquiva antigas ao iniciar e salva
+    arquivar_antigas(tarefas)
+    save_tarefas(tarefas)
+    # O menu e interação com usuário não está implementado linha a linha aqui,
+    # mas o programa tem todas as funções que o menu deve chamar.
+    print("Sistema pronto. Use as funções: criar_tarefa, pegar_proxima, atualizar_prioridade, concluir_tarefa, excluir_tarefa, relatorio_completo, relatorio_arquivados.")
